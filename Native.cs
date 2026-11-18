@@ -9,6 +9,8 @@ namespace MellowClick
         internal const int WM_HOTKEY = 0x0312;
         internal const int WM_INPUT = 0x00FF;
         internal const uint Injected = 1;
+        internal static readonly int RawHeaderSize = Marshal.SizeOf(typeof(RawInputHeader));
+        private static readonly int InputSize = Marshal.SizeOf(typeof(Input));
         internal static readonly UIntPtr InputTag = new UIntPtr(0x4D434C4B);
         internal delegate IntPtr MouseProc(int code, IntPtr message, IntPtr data);
         [StructLayout(LayoutKind.Sequential)] internal struct Point { public int X, Y; }
@@ -52,7 +54,8 @@ namespace MellowClick
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr GetModuleHandle(string name);
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] internal static extern bool UnregisterHotKey(IntPtr window, int id);
-        [DllImport("user32.dll", SetLastError = true)] internal static extern uint SendInput(uint count, Input[] inputs, int size);
+        [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, ref Input input, int size);
+        [DllImport("user32.dll")] internal static extern short GetAsyncKeyState(int key);
         [DllImport("user32.dll")] internal static extern bool GetCursorPos(out Point point);
         [DllImport("user32.dll")] internal static extern IntPtr WindowFromPoint(Point point);
         [DllImport("user32.dll")] internal static extern IntPtr GetAncestor(IntPtr window, uint flags);
@@ -78,14 +81,17 @@ namespace MellowClick
         internal static bool SendButton(bool right, bool down)
         {
             uint flags = right ? (down ? 0x0008u : 0x0010u) : (down ? 0x0002u : 0x0004u);
-            return SendInput(1, new[] { MouseEvent(flags) }, Marshal.SizeOf(typeof(Input))) == 1;
+            return Send(MouseEvent(flags));
+        }
+        internal static bool Send(Input input)
+        {
+            return SendInput(1, ref input, InputSize) == 1;
         }
         internal static ushort PhysicalRawButtons(IntPtr buffer, uint bytes)
         {
-            int headerBytes = Marshal.SizeOf(typeof(RawInputHeader));
+            int headerBytes = RawHeaderSize;
             if (bytes < headerBytes + 24) return 0;
-            var header = (RawInputHeader)Marshal.PtrToStructure(buffer, typeof(RawInputHeader));
-            if (header.Type != 0 || header.Device == IntPtr.Zero) return 0;
+            if (Marshal.ReadInt32(buffer) != 0 || Marshal.ReadIntPtr(buffer, 8) == IntPtr.Zero) return 0;
             if (unchecked((uint)Marshal.ReadInt32(buffer, headerBytes + 20)) == InputTag.ToUInt32()) return 0;
             return (ushort)(Marshal.ReadInt16(buffer, headerBytes + 4) & 0x0F);
         }

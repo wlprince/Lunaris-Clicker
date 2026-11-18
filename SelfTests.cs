@@ -38,6 +38,7 @@ namespace MellowClick
                 }
                 Assert(ClickEngine.IntervalMilliseconds(12, 12, .5) == 1000.0 / 12, "Equal CPS endpoints and random bounds");
                 TestPulses();
+                TestContinuousMode();
                 TestRawInput();
                 int left = 0, rightCount = 0; bool allowed = true;
                 using (var engine = new ClickEngine(delegate { return Volatile.Read(ref allowed); }, delegate(bool r) { if (r) Interlocked.Increment(ref rightCount); else Interlocked.Increment(ref left); return true; }))
@@ -133,6 +134,55 @@ namespace MellowClick
             }
         }
 
+        private static void TestContinuousMode()
+        {
+            int clicks = 0;
+            bool allowed = false;
+            using (var engine = new ClickEngine(() => Volatile.Read(ref allowed), right =>
+            {
+                if (!right) throw new InvalidOperationException("Expected right clicks.");
+                Interlocked.Increment(ref clicks);
+                return true;
+            }))
+            {
+                engine.Continuous = true;
+                engine.Right = true;
+                engine.SetRange(60, 60);
+                engine.Active = true;
+                Thread.Sleep(80);
+                Assert(clicks == 0, "Continuous mode respects a blocked target");
+
+                Volatile.Write(ref allowed, true);
+                WaitUntil(() => Volatile.Read(ref clicks) >= 3);
+                Assert(!engine.Held, "Continuous mode sends clicks without a physical hold");
+
+                engine.ObserveMouse(0x204, 0);
+                engine.ObserveMouse(0x205, 0);
+                int before = Volatile.Read(ref clicks);
+                WaitUntil(() => Volatile.Read(ref clicks) > before);
+                Assert(!engine.Held, "Physical release does not stop continuous mode");
+
+                engine.Active = false;
+                Thread.Sleep(40);
+                before = Volatile.Read(ref clicks);
+                Thread.Sleep(80);
+                Assert(clicks == before, "Toggle off stops continuous clicks");
+
+                engine.Continuous = false;
+                engine.Active = true;
+                Thread.Sleep(80);
+                Assert(clicks == before, "Switching back to hold requires a physical press");
+            }
+
+            var trace = new List<bool>();
+            var pulse = new ClickPulse((right, down) => { trace.Add(down); return true; });
+            Assert(pulse.Emit(false, 18, 30, ms => true, false) == PulseResult.Sent &&
+                trace.Count == 2 && trace[0] && !trace[1], "Continuous pulse sends only DOWN and matching UP");
+            trace.Clear();
+            Assert(pulse.Emit(false, 18, 30, ms => false, false) == PulseResult.Cancelled &&
+                trace.Count == 0, "Continuous pulse rechecks permission before pressing");
+        }
+
         private static void TestRawInput()
         {
             int headerBytes = Marshal.SizeOf(typeof(Native.RawInputHeader));
@@ -212,15 +262,17 @@ namespace MellowClick
                     {
                         var forward = Native.MouseEvent(0x2001); forward.Data.Mouse.X = 1;
                         var backward = Native.MouseEvent(0x2001); backward.Data.Mouse.X = -1;
-                        inserted = Native.SendInput(2, new[] { forward, backward }, Marshal.SizeOf(typeof(Native.Input)));
+                        uint moved = Native.Send(forward) ? 1u : 0u;
+                        if (Native.Send(backward)) moved++;
+                        Volatile.Write(ref inserted, moved);
                     });
                     var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
                     var frame = new DispatcherFrame(); var watch = Stopwatch.StartNew();
-                    timer.Tick += delegate { if (observed > 0 || watch.ElapsedMilliseconds > 2000) frame.Continue = false; };
+                    timer.Tick += delegate { if (observed >= 2 || watch.ElapsedMilliseconds > 2000) frame.Continue = false; };
                     timer.Start(); Dispatcher.PushFrame(frame); timer.Stop();
                     // Allow SendInput's worker to return after the hook callback finishes.
                     WaitUntil(delegate { return Volatile.Read(ref inserted) == 2; });
-                    Assert(observed > 0, "Real SendInput -> low-level hook; injected flag preserved");
+                    Assert(observed == 2, "Real SendInput -> low-level hook; injected flag preserved");
                     }
                     else results.Add("SKIP SendInput movement (passive test mode)");
                     bool registered = Native.RegisterHotKey(source.Handle, 912, 0x4000, 0x86);

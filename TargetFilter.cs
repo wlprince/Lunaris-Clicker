@@ -1,11 +1,22 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace MellowClick
 {
     internal sealed class TargetFilter
     {
+        private struct ProcessName
+        {
+            internal string Name;
+            internal int CheckedAt;
+        }
+
+        private readonly Dictionary<uint, ProcessName> processNames = new Dictionary<uint, ProcessName>();
+        private readonly StringBuilder nameBuffer = new StringBuilder(1024);
+        private static readonly uint GuiInfoSize = (uint)Marshal.SizeOf(typeof(Native.GuiThreadInfo));
         private volatile bool enabled = true;
         private volatile string expectedName = "Minecraft.Windows.exe";
         private volatile string lastProcessName = "ещё не проверено";
@@ -34,21 +45,39 @@ namespace MellowClick
         {
             uint pid;
             if (window == IntPtr.Zero || Native.GetWindowThreadProcessId(window, out pid) == 0) return null;
+            return ReadProcessName(pid, new StringBuilder(1024));
+        }
+        private static string ReadProcessName(uint pid, StringBuilder buffer)
+        {
             IntPtr process = Native.OpenProcess(0x1000, false, pid);
             if (process == IntPtr.Zero) return null;
             try
             {
-                var buffer = new StringBuilder(1024); uint length = (uint)buffer.Capacity;
+                uint length = (uint)buffer.Capacity;
                 if (Native.QueryFullProcessImageName(process, 0, buffer, ref length)) return Path.GetFileName(buffer.ToString());
-                if (System.Runtime.InteropServices.Marshal.GetLastWin32Error() != 122) return null;
-                buffer = new StringBuilder(32768); length = (uint)buffer.Capacity;
+                if (Marshal.GetLastWin32Error() != 122) return null;
+                buffer.EnsureCapacity(32768);
+                length = (uint)buffer.Capacity;
                 return Native.QueryFullProcessImageName(process, 0, buffer, ref length) ? Path.GetFileName(buffer.ToString()) : null;
             }
             finally { Native.CloseHandle(process); }
         }
-        private static bool WindowMatches(IntPtr window, string expected)
+        private string CachedWindowProcessName(IntPtr window)
         {
-            string name = WindowProcessName(window);
+            uint pid;
+            if (window == IntPtr.Zero || Native.GetWindowThreadProcessId(window, out pid) == 0) return null;
+            int now = Environment.TickCount;
+            ProcessName entry;
+            if (processNames.TryGetValue(pid, out entry) && unchecked((uint)(now - entry.CheckedAt)) < 1000) return entry.Name;
+
+            // Keep the cache bounded and revalidate names in case Windows reuses a PID.
+            if (processNames.Count == 16 && !processNames.ContainsKey(pid)) processNames.Clear();
+            string name = ReadProcessName(pid, nameBuffer);
+            processNames[pid] = new ProcessName { Name = name, CheckedAt = now };
+            return name;
+        }
+        private bool WindowMatches(IntPtr window, string expected, string name)
+        {
             if (Matches(expected, name)) return true;
             // Windows 10 UWP windows can be owned by ApplicationFrameHost while
             // their content belongs to Minecraft.Windows.exe.
@@ -56,7 +85,7 @@ namespace MellowClick
             bool found = false;
             Native.EnumWindowProc callback = delegate(IntPtr child, IntPtr parameter)
             {
-                if (Native.IsWindowVisible(child) && Matches(expected, WindowProcessName(child))) { found = true; return false; }
+                if (Native.IsWindowVisible(child) && Matches(expected, CachedWindowProcessName(child))) { found = true; return false; }
                 return true;
             };
             Native.EnumChildWindows(window, callback, IntPtr.Zero);
@@ -69,16 +98,19 @@ namespace MellowClick
             if (pointerWindow == IntPtr.Zero || foregroundWindow == IntPtr.Zero) return false;
             IntPtr pointerRoot = Native.GetAncestor(pointerWindow, 2);
             IntPtr foregroundRoot = Native.GetAncestor(foregroundWindow, 2);
-            lastProcessName = WindowProcessName(foregroundRoot) ?? "не удалось определить";
+            string expected = expectedName;
+            string foregroundName = CachedWindowProcessName(foregroundRoot);
+            lastProcessName = foregroundName ?? "не удалось определить";
             // A game can capture the mouse while the system cursor no longer
             // identifies its content window. Respect its actual capture owner.
             if (pointerRoot != foregroundRoot)
             {
-                var info = new Native.GuiThreadInfo { Size = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(Native.GuiThreadInfo)) };
+                var info = new Native.GuiThreadInfo { Size = GuiInfoSize };
                 if (!Native.GetGUIThreadInfo(0, ref info) || info.Capture == IntPtr.Zero || Native.GetAncestor(info.Capture, 2) != foregroundRoot) return false;
-                return WindowMatches(foregroundRoot, expectedName);
+                return WindowMatches(foregroundRoot, expected, foregroundName);
             }
-            return WindowMatches(pointerWindow, expectedName) || WindowMatches(foregroundRoot, expectedName);
+            return (pointerWindow != foregroundRoot && WindowMatches(pointerWindow, expected, CachedWindowProcessName(pointerWindow))) ||
+                WindowMatches(foregroundRoot, expected, foregroundName);
         }
     }
 }

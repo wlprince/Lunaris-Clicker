@@ -6,6 +6,9 @@ namespace MellowClick
 {
     public sealed class Settings
     {
+        private static readonly Lazy<XmlSerializer> Serializer = new Lazy<XmlSerializer>(() => new XmlSerializer(typeof(Settings)));
+
+        public bool Continuous;
         public int Minimum = 10;
         public int Maximum = 14;
         public bool RightButton = true;
@@ -23,7 +26,7 @@ namespace MellowClick
             {
                 using (var stream = File.OpenRead(FilePath))
                 {
-                    var settings = (Settings)new XmlSerializer(typeof(Settings)).Deserialize(stream);
+                    var settings = (Settings)Serializer.Value.Deserialize(stream);
                     settings.Minimum = Math.Max(1, Math.Min(60, settings.Minimum));
                     settings.Maximum = Math.Max(settings.Minimum, Math.Min(60, settings.Maximum));
                     if (!ValidKey(settings.Hotkey) || settings.Modifiers > 7) { settings.Hotkey = 0x75; settings.Modifiers = 0; }
@@ -44,7 +47,7 @@ namespace MellowClick
         {
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
             string temporary = FilePath + ".tmp";
-            using (var stream = File.Create(temporary)) new XmlSerializer(typeof(Settings)).Serialize(stream, this);
+            using (var stream = File.Create(temporary)) Serializer.Value.Serialize(stream, this);
             if (File.Exists(FilePath)) File.Replace(temporary, FilePath, null);
             else File.Move(temporary, FilePath);
         }

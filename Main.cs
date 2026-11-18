@@ -8,16 +8,15 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
-using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("Lunaris")]
-[assembly: AssemblyDescription("Hold-to-click desktop autoclicker")]
+[assembly: AssemblyDescription("Desktop autoclicker")]
 [assembly: AssemblyCompany("Lunaris")]
 [assembly: AssemblyProduct("Lunaris")]
-[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
 
 namespace MellowClick
 {
@@ -26,6 +25,8 @@ namespace MellowClick
         [STAThread]
         private static int Main(string[] args)
         {
+            // The small, static interface does not need a dedicated graphics device.
+            RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
             if (args.Length > 0 && (args[0] == "--self-test" || args[0] == "--self-test-passive")) return SelfTests.Run(args.Length > 1 ? args[1] : "test-results.txt", args[0] == "--self-test-passive");
             if (!CloseOlderInstance()) return 0;
             bool created;
@@ -59,7 +60,8 @@ namespace MellowClick
         }
         private static bool CloseOlderInstance()
         {
-            var current = Process.GetCurrentProcess();
+            int currentId, sessionId;
+            using (var current = Process.GetCurrentProcess()) { currentId = current.Id; sessionId = current.SessionId; }
             var version = Assembly.GetExecutingAssembly().GetName().Version;
             foreach (var process in Process.GetProcesses())
             {
@@ -67,7 +69,7 @@ namespace MellowClick
                 {
                     try
                     {
-                        if (process.Id == current.Id || process.SessionId != current.SessionId || !(process.ProcessName.StartsWith("MellowClick", StringComparison.OrdinalIgnoreCase) || process.ProcessName.StartsWith("Lunaris", StringComparison.OrdinalIgnoreCase))) continue;
+                        if (process.Id == currentId || process.SessionId != sessionId || !(process.ProcessName.StartsWith("MellowClick", StringComparison.OrdinalIgnoreCase) || process.ProcessName.StartsWith("Lunaris", StringComparison.OrdinalIgnoreCase))) continue;
                         var info = FileVersionInfo.GetVersionInfo(process.MainModule.FileName);
                         Version existing;
                         if (!((info.ProductName == "Mellow Click" && info.CompanyName == "Mellow") || (info.ProductName == "Lunaris" && info.CompanyName == "Lunaris")) || !Version.TryParse(info.FileVersion, out existing) || existing >= version) continue;
@@ -92,7 +94,7 @@ namespace MellowClick
     {
         internal readonly Window Window;
         private readonly Settings settings;
-        private ClickEngine engine;
+        private readonly ClickEngine engine;
         private readonly Native.MouseProc mouseProc;
         private IntPtr hook, handle;
         private HwndSource source;
@@ -108,9 +110,12 @@ namespace MellowClick
         private readonly TextBlock statusTitle, statusHint, rangeLabel, bindHint, saveLabel;
         private readonly System.Windows.Shapes.Ellipse statusDot;
         private readonly DispatcherTimer refresh, saveTimer;
-        private bool syncing, capturing, closed, hookReady, hotkeyReady;
+        private bool syncing, capturing, closed, hotkeyReady;
         private bool captureHide, hideReady, hidden, testWasVisible;
         private IntPtr testHandle;
+        private volatile bool targetAllowed;
+        private string toggleKeyName;
+        private readonly TextBlock inputState;
         private IntPtr rawBuffer;
         private bool rawReady;
         private string inputError;
@@ -118,7 +123,14 @@ namespace MellowClick
         internal const int ToggleId = 401, HideId = 403;
 
         private T Find<T>(string name) where T : class { return (T)Window.FindName(name); }
-        private static Brush Brush(string hex) { return (Brush)new BrushConverter().ConvertFromString(hex); }
+        private static Brush Brush(string hex)
+        {
+            var brush = (Brush)new BrushConverter().ConvertFromString(hex);
+            brush.Freeze();
+            return brush;
+        }
+        private static readonly Brush ActiveDot = Brush("#42B78B"), InactiveDot = Brush("#B0A5C4");
+        private static readonly Brush ActiveSwitch = Brush("#7860E8"), DarkSwitch = Brush("#51445E"), LightSwitch = Brush("#C8BFD8");
 
         internal MainController()
         {
@@ -145,16 +157,24 @@ namespace MellowClick
             rangeLabel = Find<TextBlock>("RangeLabel"); bindHint = Find<TextBlock>("BindHint"); saveLabel = Find<TextBlock>("SaveLabel");
             statusDot = Find<System.Windows.Shapes.Ellipse>("StatusDot");
             mouseProc = OnMouse;
-            engine = new ClickEngine(TargetAllowed, new ClickPulse(Native.SendButton).Emit);
+            inputState = Find<TextBlock>("InputState");
+            engine = new ClickEngine(delegate { return targetAllowed = TargetAllowed(); }, new ClickPulse(Native.SendButton).Emit);
             engine.Right = settings.RightButton;
+            engine.Continuous = settings.Continuous;
             engine.SetRange(settings.Minimum, settings.Maximum);
             engine.Failed += delegate { Window.Dispatcher.BeginInvoke(new Action(delegate { if (!closed) { SetActive(false); inputError = "Windows не принимает клики в этом окне."; UpdateStatus(); } })); };
             saveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
             saveTimer.Tick += delegate { saveTimer.Stop(); Save(); };
-            refresh = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
-            refresh.Tick += delegate { UpdateStatus(); };
+            refresh = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            refresh.Tick += delegate { UpdateLiveStatus(); };
             SyncRange();
             rightRadio.IsChecked = settings.RightButton; leftRadio.IsChecked = !settings.RightButton;
+            var continuousRadio = Find<RadioButton>("ContinuousRadio");
+            var holdRadio = Find<RadioButton>("HoldRadio");
+            continuousRadio.IsChecked = settings.Continuous;
+            holdRadio.IsChecked = !settings.Continuous;
+            continuousRadio.Checked += delegate { SelectMode(true); };
+            holdRadio.Checked += delegate { SelectMode(false); };
             UpdateBind();
             UpdateThemeIcons();
             minSlider.ValueChanged += delegate { if (!syncing) SetRange((int)minSlider.Value, Math.Max((int)minSlider.Value, settings.Maximum)); };
@@ -168,7 +188,7 @@ namespace MellowClick
             Find<Button>("ThemeButton").Click += delegate { settings.DarkTheme = !settings.DarkTheme; ApplyTheme(); ScheduleSave(); };
             appCheck.Checked += delegate { SelectApplicationRestriction(true); };
             appCheck.Unchecked += delegate { SelectApplicationRestriction(false); };
-            appBox.TextChanged += delegate { if (!syncing) { engine.Active = false; targetFilter.ExpectedName = ""; appHint.Text = "Enter — применить имя"; UpdateStatus(); } };
+            appBox.TextChanged += delegate { if (!syncing) { SetActive(false); targetFilter.ExpectedName = ""; appHint.Text = "Enter — применить имя"; UpdateStatus(); } };
             appBox.LostKeyboardFocus += delegate { CommitApplication(); };
             appBox.PreviewKeyDown += delegate(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) { CommitApplication(); Keyboard.ClearFocus(); e.Handled = true; } };
             Find<Button>("CloseButton").Click += delegate { Window.Close(); };
@@ -180,7 +200,9 @@ namespace MellowClick
             Window.Deactivated += delegate { if (capturing) CancelCapture(); };
             Window.SourceInitialized += OnReady;
             Window.Closed += OnClosed;
-            Window.Loaded += delegate { refresh.Start(); UpdateStatus(); };
+            Window.Loaded += delegate { UpdateStatus(); };
+            Window.IsVisibleChanged += delegate { UpdateRefresh(); };
+            Window.StateChanged += delegate { UpdateRefresh(); };
         }
         private bool TargetAllowed()
         {
@@ -190,22 +212,48 @@ namespace MellowClick
             IntPtr target = Native.WindowFromPoint(point);
             if (target == IntPtr.Zero || Native.GetAncestor(target, 2) == handle) return false;
             IntPtr foreground = Native.GetForegroundWindow();
-            if (testHandle != IntPtr.Zero && Native.GetAncestor(target, 2) == testHandle && Native.GetAncestor(foreground, 2) == testHandle) return true;
+            IntPtr test = Interlocked.CompareExchange(ref testHandle, IntPtr.Zero, IntPtr.Zero);
+            if (test != IntPtr.Zero && Native.GetAncestor(target, 2) == test && Native.GetAncestor(foreground, 2) == test) return true;
             return targetFilter.Allows(target, foreground);
         }
         private void OnReady(object sender, EventArgs e)
         {
             handle = new WindowInteropHelper(Window).Handle;
             source = HwndSource.FromHwnd(handle); source.AddHook(OnMessage);
-            hook = Native.SetWindowsHookEx(14, mouseProc, Native.GetModuleHandle(null), 0);
-            rawBuffer = Marshal.AllocHGlobal(256);
-            rawReady = Native.RegisterRawInputDevices(new[] { new Native.RawInputDevice { UsagePage = 1, Usage = 2, Flags = 0x100, Target = handle } }, 1, (uint)Marshal.SizeOf(typeof(Native.RawInputDevice)));
-            hookReady = hook != IntPtr.Zero || rawReady;
             hotkeyReady = RegisterToggle();
             hideReady = RegisterHide();
-            if (!hookReady) { toggle.IsEnabled = false; statusHint.Text = "Не удалось подключить мышь. Перезапусти приложение."; }
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.PowerModeChanged += OnPowerMode;
+        }
+        private bool StartMouseTracking()
+        {
+            hook = Native.SetWindowsHookEx(14, mouseProc, Native.GetModuleHandle(null), 0);
+            if (rawBuffer == IntPtr.Zero) rawBuffer = Marshal.AllocHGlobal(256);
+            rawReady = RegisterMouse(0x100, handle);
+            if (hook == IntPtr.Zero && !rawReady) return false;
+
+            // Preserve a hold that began before the activation hotkey.
+            if ((Native.GetAsyncKeyState(1) & 0x8000) != 0) engine.ObserveMouse(0x201, 0);
+            if ((Native.GetAsyncKeyState(2) & 0x8000) != 0) engine.ObserveMouse(0x204, 0);
+            return true;
+        }
+        private static bool RegisterMouse(uint flags, IntPtr window)
+        {
+            var devices = new[] { new Native.RawInputDevice { UsagePage = 1, Usage = 2, Flags = flags, Target = window } };
+            return Native.RegisterRawInputDevices(devices, 1, (uint)Marshal.SizeOf(typeof(Native.RawInputDevice)));
+        }
+        private void StopMouseTracking()
+        {
+            if (hook != IntPtr.Zero)
+            {
+                Native.UnhookWindowsHookEx(hook);
+                hook = IntPtr.Zero;
+            }
+            if (rawReady)
+            {
+                RegisterMouse(1, IntPtr.Zero);
+                rawReady = false;
+            }
         }
         private IntPtr OnMouse(int code, IntPtr message, IntPtr data)
         {
@@ -214,8 +262,7 @@ namespace MellowClick
                 int msg = message.ToInt32();
                 if (msg == 0x201 || msg == 0x202 || msg == 0x204 || msg == 0x205)
                 {
-                    var info = (Native.MouseHookData)Marshal.PtrToStructure(data, typeof(Native.MouseHookData));
-                    engine.ObserveMouse(msg, info.Flags);
+                    engine.ObserveMouse(msg, unchecked((uint)Marshal.ReadInt32(data, 12)));
                 }
             }
             return Native.CallNextHookEx(hook, code, message, data);
@@ -227,7 +274,7 @@ namespace MellowClick
             if (msg == Native.WM_INPUT && rawReady)
             {
                 uint capacity = 256;
-                uint bytes = Native.GetRawInputData(lParam, 0x10000003, rawBuffer, ref capacity, (uint)Marshal.SizeOf(typeof(Native.RawInputHeader)));
+                uint bytes = Native.GetRawInputData(lParam, 0x10000003, rawBuffer, ref capacity, (uint)Native.RawHeaderSize);
                 if (bytes != uint.MaxValue && bytes <= 256)
                 {
                     ushort buttons = Native.PhysicalRawButtons(rawBuffer, bytes);
@@ -249,7 +296,21 @@ namespace MellowClick
         {
             if (capturing) CancelCapture();
             inputError = null;
-            engine.Active = value && hookReady && (!settings.RestrictToApplication || CommitApplication());
+            engine.ResetPhysicalState();
+            StopMouseTracking();
+            targetAllowed = false;
+            if (value && (!settings.RestrictToApplication || CommitApplication()))
+            {
+                if (settings.Continuous || StartMouseTracking()) engine.Active = true;
+                else inputError = "Не удалось подключить отслеживание кнопок мыши.";
+            }
+            UpdateStatus();
+        }
+        private void SelectMode(bool continuous)
+        {
+            SetActive(false);
+            settings.Continuous = engine.Continuous = continuous;
+            ScheduleSave();
             UpdateStatus();
         }
         private void SelectButton(bool right)
@@ -262,16 +323,16 @@ namespace MellowClick
             if (name.Length == 2 && name[0] == 'D' && char.IsDigit(name[1])) name = name.Substring(1);
             return ((modifiers & 2) != 0 ? "Ctrl + " : "") + ((modifiers & 1) != 0 ? "Alt + " : "") + ((modifiers & 4) != 0 ? "Shift + " : "") + name;
         }
-        private string KeyName() { return KeyName(settings.Hotkey, settings.Modifiers); }
         private void UpdateBind()
         {
-            bind.Content = capturing && !captureHide ? "Нажми клавишу…" : KeyName() + "   ⌨";
+            toggleKeyName = KeyName(settings.Hotkey, settings.Modifiers);
+            bind.Content = capturing && !captureHide ? "Нажми клавишу…" : toggleKeyName + "   ⌨";
+            bindHint.Text = toggleKeyName + " — включить / выключить";
             hideBind.Content = capturing && captureHide ? "Нажми клавишу…" : KeyName(settings.HideHotkey, settings.HideModifiers) + "   ⌨";
         }
         private void BeginCapture(bool hide)
         {
-            engine.Active = false;
-            inputError = null;
+            SetActive(false);
             captureHide = hide;
             Native.UnregisterHotKey(handle, hide ? HideId : ToggleId); capturing = true;
             (hide ? hideBind : bind).Focus(); UpdateBind(); UpdateStatus();
@@ -376,6 +437,7 @@ namespace MellowClick
             hidden = false; Window.Show(); Window.WindowState = WindowState.Normal; Window.Activate();
             if (testWasVisible && testWindow != null) testWindow.Window.Show();
             testWasVisible = false;
+            UpdateStatus();
         }
         private void SetRange(int min, int max)
         {
@@ -396,48 +458,73 @@ namespace MellowClick
             try { settings.Save(); saveLabel.Text = "Настройки сохранены"; }
             catch { saveLabel.Text = "Не удалось сохранить настройки"; }
         }
+        private static bool IsShown(Window window)
+        {
+            return window.IsVisible && window.WindowState != WindowState.Minimized;
+        }
+        private void UpdateRefresh()
+        {
+            if (!closed && engine.Active && (IsShown(Window) || (testWindow != null && IsShown(testWindow.Window)))) refresh.Start();
+            else refresh.Stop();
+        }
+        private void UpdateLiveStatus()
+        {
+            bool active = engine.Active;
+            bool ready = engine.Ready;
+            bool clicking = ready && targetAllowed;
+            statusTitle.Text = capturing ? "Новый бинд" : !active ? "Выключен" : clicking ? "Клики активны" : ready ? "Клики приостановлены" : "Готов к удержанию";
+            if (!capturing)
+            {
+                string button = settings.RightButton ? "ПКМ" : "ЛКМ";
+                if (inputError != null) statusHint.Text = inputError;
+                else if (ready && !targetAllowed) statusHint.Text = settings.RestrictToApplication ? "Ожидание окна: " + settings.ApplicationName : "Наведи курсор на нужное окно";
+                else if (active && settings.Continuous) statusHint.Text = toggleKeyName + " — выключить";
+                else if (clicking) statusHint.Text = "Отпусти кнопку — клики остановятся";
+                else if (active) statusHint.Text = "Зажми " + button + " в нужном окне";
+                else if (!hotkeyReady && handle != IntPtr.Zero) statusHint.Text = "Бинд занят. Измени его ниже или включи переключатель.";
+                else statusHint.Text = toggleKeyName + (settings.Continuous ? " — включить" : " — включить, затем зажми " + button);
+            }
+            long count = engine.Count;
+            inputState.Text = (settings.RestrictToApplication ? "Последняя цель: " + targetFilter.LastProcessName + "\n" : "") +
+                (settings.Continuous ? "" : "Удержание: " + (engine.Held ? "да" : "нет") + " · ") + "кликов: " + count;
+            if (testWindow != null) testWindow.Update(active, settings.Continuous, settings.RightButton, toggleKeyName, count);
+        }
         private void UpdateStatus()
         {
             bool active = engine.Active;
-            bindHint.Text = KeyName() + " — включить / выключить";
-            bool targetAllowed = active && TargetAllowed();
-            bool clicking = active && engine.Held && targetAllowed;
-            statusTitle.Text = capturing ? "Новый бинд" : active ? (clicking ? "Клики активны" : "Готов к удержанию") : "Выключен";
-            statusDot.Fill = Brush(active ? "#42B78B" : "#B0A5C4");
-            if (!capturing)
-            {
-                if (!hookReady && handle != IntPtr.Zero) statusHint.Text = "Не удалось подключить мышь. Перезапусти приложение.";
-                else if (!hotkeyReady && handle != IntPtr.Zero) statusHint.Text = "Бинд занят. Измени его ниже или включи переключатель.";
-                else if (inputError != null) statusHint.Text = inputError;
-                else statusHint.Text = active ? (clicking ? "Отпусти кнопку — клики остановятся" : "Зажми " + (settings.RightButton ? "ПКМ" : "ЛКМ") + " в нужном окне") : KeyName() + " — включить, затем зажми " + (settings.RightButton ? "ПКМ" : "ЛКМ");
-            }
-            else if (!statusHint.Text.Contains("Выбери") && !statusHint.Text.Contains("Esc") && !statusHint.Text.Contains("Используй")) statusHint.Text = "Нажми клавишу. Ctrl / Alt / Shift + клавиша тоже работают.";
+            if (capturing && !statusHint.Text.Contains("Esc")) statusHint.Text = "Нажми клавишу. Esc — отмена.";
+            statusDot.Fill = active ? ActiveDot : InactiveDot;
             hideHint.Text = !hideReady && handle != IntPtr.Zero ? "Бинд занят — выбери другую клавишу" : "Продолжает работать без окна на панели задач";
-            Find<TextBlock>("InputState").Text = "Последняя цель: " + targetFilter.LastProcessName + "\nУдержание: " + (engine.Held ? "да" : "нет") + " · кликов: " + engine.Count;
-            if (active && settings.RestrictToApplication && !targetAllowed && !capturing) statusHint.Text = "Ожидание окна: " + settings.ApplicationName;
-            toggle.Background = Brush(active ? "#7860E8" : settings.DarkTheme ? "#51445E" : "#C8BFD8");
+            toggle.Background = active ? ActiveSwitch : settings.DarkTheme ? DarkSwitch : LightSwitch;
             toggle.ApplyTemplate();
             var knob = toggle.Template.FindName("SwitchKnob", toggle) as FrameworkElement;
             if (knob != null) knob.HorizontalAlignment = active ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             System.Windows.Automation.AutomationProperties.SetName(toggle, active ? "Выключить автокликер" : "Включить автокликер");
-            if (testWindow != null) testWindow.Update(active, settings.RightButton, KeyName(), engine.Count);
+            UpdateRefresh();
+            UpdateLiveStatus();
         }
         private void OpenTest()
         {
             if (capturing) CancelCapture();
             if (testWindow != null) { testWindow.Window.Activate(); return; }
             testWindow = new TestWindow(settings.DarkTheme); testWindow.Window.Owner = Window;
-            testWindow.Window.Closed += delegate { SetActive(false); testWindow = null; testHandle = IntPtr.Zero; };
-            testWindow.Window.Show(); testHandle = new WindowInteropHelper(testWindow.Window).Handle; UpdateStatus();
+            testWindow.Window.Closed += delegate
+            {
+                testWindow = null;
+                Interlocked.Exchange(ref testHandle, IntPtr.Zero);
+                if (!closed) SetActive(false);
+            };
+            testWindow.Window.IsVisibleChanged += delegate { UpdateRefresh(); };
+            testWindow.Window.StateChanged += delegate { UpdateRefresh(); };
+            testWindow.Window.Show(); Interlocked.Exchange(ref testHandle, new WindowInteropHelper(testWindow.Window).Handle); UpdateStatus();
         }
-        private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) { Window.Dispatcher.BeginInvoke(new Action(delegate { if (!closed) { engine.ResetPhysicalState(); UpdateStatus(); } })); }
+        private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) { Window.Dispatcher.BeginInvoke(new Action(delegate { if (!closed) SetActive(false); })); }
         private void OnPowerMode(object sender, PowerModeChangedEventArgs e) { if (e.Mode == PowerModes.Suspend) OnSessionSwitch(sender, null); }
         private void OnClosed(object sender, EventArgs e)
         {
             closed = true; refresh.Stop(); saveTimer.Stop();
             engine.ResetPhysicalState();
-            if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook);
-            if (rawReady) Native.RegisterRawInputDevices(new[] { new Native.RawInputDevice { UsagePage = 1, Usage = 2, Flags = 1, Target = IntPtr.Zero } }, 1, (uint)Marshal.SizeOf(typeof(Native.RawInputDevice)));
+            StopMouseTracking();
             if (rawBuffer != IntPtr.Zero) { Marshal.FreeHGlobal(rawBuffer); rawBuffer = IntPtr.Zero; }
             Native.UnregisterHotKey(handle, ToggleId); Native.UnregisterHotKey(handle, HideId);
             SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.PowerModeChanged -= OnPowerMode;
@@ -460,10 +547,10 @@ namespace MellowClick
             pad.PreviewMouseDown += delegate(object sender, MouseButtonEventArgs e) { if (e.ChangedButton != MouseButton.Left && e.ChangedButton != MouseButton.Right) return; if (!watch.IsRunning) watch.Start(); count++; number.Text = count.ToString(); e.Handled = true; };
             ((Button)Window.FindName("ResetButton")).Click += delegate { count = 0; number.Text = "0"; watch.Reset(); baseline = -1; };
         }
-        internal void Update(bool active, bool right, string key, long sent)
+        internal void Update(bool active, bool continuous, bool right, string key, long sent)
         {
             if (baseline < 0) baseline = sent;
-            hint.Text = active ? "Зажми " + (right ? "ПКМ" : "ЛКМ") + " на площадке · " + key + " — выключить" : "Нажми " + key + ", затем зажми " + (right ? "ПКМ" : "ЛКМ");
+            hint.Text = continuous ? (active ? key + " — выключить" : "Наведи курсор на площадку и нажми " + key) : active ? "Зажми " + (right ? "ПКМ" : "ЛКМ") + " на площадке · " + key + " — выключить" : "Нажми " + key + ", затем зажми " + (right ? "ПКМ" : "ЛКМ");
             details.Text = "Получено на площадке · отправлено автокликером: " + (sent - baseline);
         }
     }

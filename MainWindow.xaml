@@ -1,7 +1,7 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Lunaris" Width="938" Height="720" WindowStartupLocation="CenterScreen"
-        WindowStyle="None" ResizeMode="CanMinimize" AllowsTransparency="True" Background="Transparent"
+        WindowStyle="None" ResizeMode="CanMinimize" Background="#FBFAFD"
         FontFamily="Segoe UI" FontSize="13" Foreground="#252535" UseLayoutRounding="True">
   <Window.Resources>
     <SolidColorBrush x:Key="Accent" Color="#7860E8"/>
@@ -55,16 +55,15 @@
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Slider">
         <Grid Height="28" Margin="0,0,3,0">
           <Border Height="4" Background="#EDEBF3" CornerRadius="2" VerticalAlignment="Center"/>
-          <Track x:Name="PART_Track"><Track.DecreaseRepeatButton><RepeatButton Command="Slider.DecreaseLarge" Focusable="False"><RepeatButton.Template><ControlTemplate><Border Height="4" Background="#A18BEF" CornerRadius="2"/></ControlTemplate></RepeatButton.Template></RepeatButton></Track.DecreaseRepeatButton><Track.Thumb><Thumb Width="17" Height="24"><Thumb.Template><ControlTemplate><Border Width="17" Height="17" Background="White" BorderBrush="#B9A8F2" BorderThickness="1.5" CornerRadius="9"><Border.Effect><DropShadowEffect BlurRadius="4" ShadowDepth="1" Opacity="0.12"/></Border.Effect></Border></ControlTemplate></Thumb.Template></Thumb></Track.Thumb><Track.IncreaseRepeatButton><RepeatButton Command="Slider.IncreaseLarge" Focusable="False"><RepeatButton.Template><ControlTemplate><Border Background="Transparent"/></ControlTemplate></RepeatButton.Template></RepeatButton></Track.IncreaseRepeatButton></Track>
+          <Track x:Name="PART_Track"><Track.DecreaseRepeatButton><RepeatButton Command="Slider.DecreaseLarge" Focusable="False"><RepeatButton.Template><ControlTemplate><Border Height="4" Background="#A18BEF" CornerRadius="2"/></ControlTemplate></RepeatButton.Template></RepeatButton></Track.DecreaseRepeatButton><Track.Thumb><Thumb Width="17" Height="24"><Thumb.Template><ControlTemplate><Border Width="17" Height="17" Background="White" BorderBrush="#B9A8F2" BorderThickness="1.5" CornerRadius="9"/></ControlTemplate></Thumb.Template></Thumb></Track.Thumb><Track.IncreaseRepeatButton><RepeatButton Command="Slider.IncreaseLarge" Focusable="False"><RepeatButton.Template><ControlTemplate><Border Background="Transparent"/></ControlTemplate></RepeatButton.Template></RepeatButton></Track.IncreaseRepeatButton></Track>
         </Grid>
       </ControlTemplate></Setter.Value></Setter>
     </Style>
   </Window.Resources>
-  <Border Margin="13" CornerRadius="17" Background="#FBFAFD" BorderBrush="#DCD9E4" BorderThickness="1">
-    <Border.Effect><DropShadowEffect Color="#242033" BlurRadius="16" ShadowDepth="3" Opacity="0.17"/></Border.Effect>
+  <Border Background="#FBFAFD" BorderBrush="#DCD9E4" BorderThickness="1">
     <Grid>
       <Grid.ColumnDefinitions><ColumnDefinition Width="204"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-      <Border Background="#F1EFF5" CornerRadius="16,0,0,16" BorderBrush="#E5E2EC" BorderThickness="0,0,1,0">
+      <Border Background="#F1EFF5" BorderBrush="#E5E2EC" BorderThickness="0,0,1,0">
         <Grid Margin="22,0,22,20">
           <Grid.RowDefinitions><RowDefinition Height="59"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -81,17 +80,16 @@
             <Border Background="#E4DDF8" CornerRadius="8" Margin="-8,31,-8,0" Padding="13,11">
               <StackPanel Orientation="Horizontal"><TextBlock Text="◉" Foreground="#7860E8" Margin="0,0,9,0"/><TextBlock Text="Автокликер" Foreground="#6C50CE" FontWeight="SemiBold"/></StackPanel>
             </Border>
-            <TextBlock Text="КАК ЭТО РАБОТАЕТ" FontSize="9" FontWeight="SemiBold" Foreground="#A39CAC" Margin="0,30,0,17"/>
-            <TextBlock Text="01   Включи бинд" Foreground="#7E778A" FontSize="12" Margin="0,0,0,13"/>
-            <TextBlock Text="02   Зажми кнопку" Foreground="#7E778A" FontSize="12" Margin="0,0,0,13"/>
-            <TextBlock Text="03   Отпусти — стоп" Foreground="#7E778A" FontSize="12"/>
+            <TextBlock Text="Режим кликов" FontWeight="SemiBold" Margin="0,25,0,9"/>
+            <RadioButton x:Name="ContinuousRadio" GroupName="Mode" Content="Обычный" Margin="0,0,0,6"/>
+            <RadioButton x:Name="HoldRadio" GroupName="Mode" Content="При зажатии"/>
             <Border Height="1" Background="#E5E2EC" Margin="0,23,0,17"/>
             <CheckBox x:Name="AppCheck" IsChecked="True" VerticalContentAlignment="Center" FontSize="11" Cursor="Hand" AutomationProperties.Name="Работать в приложении"><TextBlock Text="Работать в приложении" TextWrapping="Wrap" Margin="3,0,0,0"/></CheckBox>
             <TextBox x:Name="AppBox" Text="Minecraft.Windows.exe" FontSize="11" Height="32" Margin="0,10,0,0" Padding="7,4" HorizontalContentAlignment="Left" AutomationProperties.Name="Имя приложения" ToolTip="Имя .exe процесса. Enter — применить."/>
             <TextBlock x:Name="AppHint" Text="Только в активном окне" FontSize="10" Foreground="#A09AA9" TextWrapping="Wrap" Margin="0,7,0,0"/>
             <TextBlock x:Name="InputState" Text="Удержание: нет · кликов: 0" FontSize="10" Foreground="#A09AA9" TextWrapping="Wrap" Margin="0,10,0,0"/>
           </StackPanel>
-          <StackPanel Grid.Row="2"><TextBlock Text="Меньше усилий." Foreground="#827A90" FontSize="12"/><TextBlock Text="Больше ритма." Foreground="#827A90" FontSize="12" Margin="0,2,0,16"/><TextBlock Text="LUNARIS  /  1.2.1" Foreground="#ADA6B7" FontSize="9"/></StackPanel>
+          <StackPanel Grid.Row="2"><TextBlock Text="Меньше усилий." Foreground="#827A90" FontSize="12"/><TextBlock Text="Больше ритма." Foreground="#827A90" FontSize="12" Margin="0,2,0,16"/><TextBlock Text="LUNARIS  /  1.3.0" Foreground="#ADA6B7" FontSize="9"/></StackPanel>
         </Grid>
       </Border>
       <Grid Grid.Column="1">
@@ -107,7 +105,7 @@
             </Grid>
           </Border>
           <Border Grid.Row="3" Style="{StaticResource Card}">
-            <StackPanel><Grid><TextBlock Text="Кнопка мыши" FontWeight="SemiBold"/><TextBlock Text="01" HorizontalAlignment="Right" Foreground="#C6C0D1" FontSize="11"/></Grid><TextBlock Text="Клики идут, пока ты удерживаешь эту кнопку." FontSize="11" Foreground="#A09AA9" Margin="0,4,0,12"/>
+            <StackPanel><Grid><TextBlock Text="Кнопка мыши" FontWeight="SemiBold"/><TextBlock Text="01" HorizontalAlignment="Right" Foreground="#C6C0D1" FontSize="11"/></Grid><TextBlock Text="Выбранная кнопка используется для автокликов." FontSize="11" Foreground="#A09AA9" Margin="0,4,0,12"/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><RadioButton x:Name="LeftRadio" GroupName="Mouse" Content="Левая · ЛКМ" AutomationProperties.Name="Левая кнопка мыши"/><RadioButton x:Name="RightRadio" Grid.Column="2" GroupName="Mouse" Content="Правая · ПКМ" IsChecked="True" AutomationProperties.Name="Правая кнопка мыши"/></Grid>
             </StackPanel>
           </Border>

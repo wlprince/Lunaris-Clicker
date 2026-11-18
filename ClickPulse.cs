@@ -3,18 +3,18 @@ using System;
 namespace MellowClick
 {
     internal enum PulseResult { Cancelled, Sent, Failed }
-    internal delegate PulseResult EmitPulse(bool right, int releaseMilliseconds, int holdMilliseconds, Func<int, bool> wait);
+    internal delegate PulseResult EmitPulse(bool right, int releaseMilliseconds, int holdMilliseconds, Func<int, bool> wait, bool releaseFirst);
 
     internal sealed class ClickPulse
     {
         private readonly Func<bool, bool, bool> send;
         internal ClickPulse(Func<bool, bool, bool> send) { this.send = send; }
-        internal PulseResult Emit(bool right, int releaseMilliseconds, int holdMilliseconds, Func<int, bool> wait)
+        internal PulseResult Emit(bool right, int releaseMilliseconds, int holdMilliseconds, Func<int, bool> wait, bool releaseFirst = true)
         {
             // Games can sample button state once per frame. Expose both states
             // for real time instead of putting UP/DOWN/UP in one input batch.
-            if (!send(right, false)) return PulseResult.Failed;
-            if (!wait(releaseMilliseconds)) return PulseResult.Cancelled;
+            if (releaseFirst && !send(right, false)) return PulseResult.Failed;
+            if (!wait(releaseFirst ? releaseMilliseconds : 0)) return PulseResult.Cancelled;
             bool pressed = false, released = false;
             try
             {

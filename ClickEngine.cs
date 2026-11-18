@@ -11,21 +11,26 @@ namespace MellowClick
         private readonly Func<bool> allowed;
         private readonly EmitPulse emit;
         private readonly Random random = new Random();
-        private volatile bool active, right, leftHeld, rightHeld, disposed;
+        private volatile bool active, continuous, right, leftHeld, rightHeld, disposed;
+        private readonly Func<int, bool> waitPhase;
+        private int pulseRevision;
         private int range = 10 | (14 << 16), revision;
         private long count;
         internal event Action Failed;
 
         internal ClickEngine(Func<bool> allowed, Func<bool, bool> click)
-            : this(allowed, delegate(bool right, int gap, int hold, Func<int, bool> wait) { return click(right) ? PulseResult.Sent : PulseResult.Failed; }) { }
+            : this(allowed, delegate(bool right, int gap, int hold, Func<int, bool> wait, bool releaseFirst) { return click(right) ? PulseResult.Sent : PulseResult.Failed; }) { }
         internal ClickEngine(Func<bool> allowed, EmitPulse emit)
         {
             this.allowed = allowed; this.emit = emit;
+            waitPhase = WaitPhase;
             worker = new Thread(Run) { IsBackground = true, Name = "Mellow click scheduler" };
             worker.Start();
         }
         internal bool Active { get { return active; } set { active = value; Changed(); } }
         internal bool Right { get { return right; } set { right = value; Changed(); } }
+        internal bool Continuous { get { return continuous; } set { continuous = value; Changed(); } }
+        internal bool Ready { get { return active && (continuous || Held); } }
         internal bool Held { get { return right ? rightHeld : leftHeld; } }
         internal long Count { get { return Interlocked.Read(ref count); } }
         internal void SetRange(int min, int max)
@@ -38,7 +43,7 @@ namespace MellowClick
         internal void ObserveMouse(int message, uint flags)
         {
             if ((flags & Native.Injected) != 0) return;
-            bool previousLeft = leftHeld, previousRight = rightHeld;
+            bool wasHeld = Held;
             switch (message)
             {
                 case 0x0201: leftHeld = true; break;
@@ -47,7 +52,7 @@ namespace MellowClick
                 case 0x0205: rightHeld = false; break;
                 default: return;
             }
-            if (previousLeft != leftHeld || previousRight != rightHeld) Changed();
+            if (!continuous && wasHeld != Held) Changed();
         }
         internal void ResetPhysicalState()
         {
@@ -74,57 +79,59 @@ namespace MellowClick
             bool preciseTimer = false;
             try
             {
-            while (!disposed)
-            {
-                if (!active || !Held || !allowed())
+                while (!disposed)
                 {
-                    due = 0;
-                    if (preciseTimer) { Native.timeEndPeriod(1); preciseTimer = false; }
-                    wake.WaitOne(20);
-                    continue;
-                }
-                int currentRevision = Volatile.Read(ref revision);
-                if (due == 0 || currentRevision != seenRevision)
-                {
-                    if (!preciseTimer) preciseTimer = Native.timeBeginPeriod(1) == 0;
-                    interval = NextInterval();
-                    due = clock.Elapsed.TotalMilliseconds + interval;
-                    seenRevision = currentRevision;
-                }
-                double remaining = due - clock.Elapsed.TotalMilliseconds;
-                if (remaining > 0)
-                {
-                    wake.WaitOne(Math.Max(1, (int)Math.Ceiling(remaining)));
-                    continue;
-                }
-                if (!disposed && active && Held && allowed() && currentRevision == Volatile.Read(ref revision))
-                {
-                    bool selectedRight = right;
-                    double start = clock.Elapsed.TotalMilliseconds;
-                    int gap = Math.Max(2, Math.Min(18, (int)Math.Round(interval * .28)));
-                    int hold = Math.Max(3, Math.Min(30, (int)Math.Round(interval * .45)));
-                    PulseResult result = emit(selectedRight, gap, hold, delegate(int milliseconds) { return WaitPhase(milliseconds, currentRevision, selectedRight); });
-                    if (result == PulseResult.Failed)
+                    bool ready = Ready;
+                    if (!ready || !allowed())
                     {
-                        active = false;
-                        var handler = Failed; if (handler != null) handler();
+                        due = 0;
+                        if (preciseTimer) { Native.timeEndPeriod(1); preciseTimer = false; }
+                        wake.WaitOne(ready ? 20 : Timeout.Infinite);
+                        continue;
                     }
-                    else if (result == PulseResult.Sent) Interlocked.Increment(ref count);
-                    interval = NextInterval();
-                    due = Math.Max(start + interval, clock.Elapsed.TotalMilliseconds);
+                    int currentRevision = Volatile.Read(ref revision);
+                    if (due == 0 || currentRevision != seenRevision)
+                    {
+                        if (!preciseTimer) preciseTimer = Native.timeBeginPeriod(1) == 0;
+                        interval = NextInterval();
+                        due = clock.Elapsed.TotalMilliseconds + (continuous ? 0 : interval);
+                        seenRevision = currentRevision;
+                    }
+                    double remaining = due - clock.Elapsed.TotalMilliseconds;
+                    if (remaining > 0)
+                    {
+                        wake.WaitOne(Math.Max(1, (int)Math.Ceiling(remaining)));
+                        continue;
+                    }
+                    if (!disposed && Ready && allowed() && currentRevision == Volatile.Read(ref revision))
+                    {
+                        bool selectedRight = right;
+                        double start = clock.Elapsed.TotalMilliseconds;
+                        int gap = Math.Max(2, Math.Min(18, (int)Math.Round(interval * .28)));
+                        int hold = Math.Max(3, Math.Min(30, (int)Math.Round(interval * .45)));
+                        pulseRevision = currentRevision;
+                        PulseResult result = emit(selectedRight, gap, hold, waitPhase, !continuous);
+                        if (result == PulseResult.Failed)
+                        {
+                            active = false;
+                            var handler = Failed; if (handler != null) handler();
+                        }
+                        else if (result == PulseResult.Sent) Interlocked.Increment(ref count);
+                        interval = NextInterval();
+                        due = Math.Max(start + interval, clock.Elapsed.TotalMilliseconds);
+                    }
+                    else due = 0;
                 }
-                else due = 0;
-            }
             }
             finally { if (preciseTimer) Native.timeEndPeriod(1); }
         }
-        private bool WaitPhase(int milliseconds, int expectedRevision, bool expectedRight)
+        private bool WaitPhase(int milliseconds)
         {
-            var clock = Stopwatch.StartNew();
+            long start = Stopwatch.GetTimestamp();
             while (true)
             {
-                if (disposed || !active || !Held || right != expectedRight || expectedRevision != Volatile.Read(ref revision) || !allowed()) return false;
-                int remaining = milliseconds - (int)clock.ElapsedMilliseconds;
+                if (disposed || !Ready || pulseRevision != Volatile.Read(ref revision) || !allowed()) return false;
+                int remaining = milliseconds - (int)((Stopwatch.GetTimestamp() - start) * 1000 / Stopwatch.Frequency);
                 if (remaining <= 0) return true;
                 wake.WaitOne(Math.Min(remaining, 3));
             }
